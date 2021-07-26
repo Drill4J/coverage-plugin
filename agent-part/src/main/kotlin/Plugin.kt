@@ -19,9 +19,14 @@ import com.epam.drill.logger.api.*
 import com.epam.drill.plugin.api.*
 import com.epam.drill.plugin.api.processing.*
 import com.epam.drill.plugins.test2code.common.api.*
+import com.github.luben.zstd.*
 import kotlinx.atomicfu.*
+import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
+import kotlinx.serialization.protobuf.*
 import org.jacoco.core.internal.data.*
+import org.mapdb.*
+import java.util.*
 
 @Suppress("unused")
 class Plugin(
@@ -45,6 +50,37 @@ class Plugin(
     private val instrumenter: DrillInstrumenter = instrumenter(instrContext, logger)
 
     private val _retransformed = atomic(false)
+    private var db: DB
+    val probesDb: HTreeMap.KeySet<Any>
+
+    init {
+        //TODO this is hack to initialize mapDB
+        Thread.currentThread().contextClassLoader = ClassLoader.getSystemClassLoader()
+        //TODO crash on agent restart without db clearing
+        db = DBMaker.fileDB("test2code.db")
+            .transactionEnable()
+            .closeOnJvmShutdown()
+            .make()
+        probesDb = db.hashSet("probes")
+            .serializer(Serializer.JAVA)
+            .createOrOpen()
+    }
+
+    val probeSenderJob = ProbeWorker.launch {
+        //TODO may be necessary to close this coroutine
+        while (true) {
+            probesDb.mapNotNull { coverDataPart ->
+                (coverDataPart as? CoverageInfo)?.also { probesDb.remove(it) }
+            }.forEach { coverInfo ->
+                coverInfo.coverMessage.forEach { send(it) }
+                val count = coverInfo.count
+                if (coverInfo.sendChanged && count > 0) {
+                    sendMessage(SessionChanged(coverInfo.sessionId, count))
+                }
+            }
+            delay(3000L)
+        }
+    }
 
     //TODO remove
     override fun setEnabled(enabled: Boolean) {
@@ -119,7 +155,7 @@ class Plugin(
             }
             is StartAgentSession -> action.payload.run {
                 logger.info { "Start recording for session $sessionId (isGlobal=$isGlobal)" }
-                val handler = probeSender(sessionId, isRealtime)
+                val handler = probeCollector(sessionId, isRealtime)
                 instrContext.start(sessionId, isGlobal, testName, handler)
                 sendMessage(SessionStarted(sessionId, testType, isRealtime, currentTimeMillis()))
             }
@@ -131,7 +167,7 @@ class Plugin(
                 logger.info { "End of recording for session $sessionId" }
                 val runtimeData = instrContext.stop(sessionId) ?: emptySequence()
                 if (runtimeData.any()) {
-                    probeSender(sessionId)(runtimeData)
+                    probeCollector(sessionId)(runtimeData)
                 } else logger.info { "No data for session $sessionId" }
                 sendMessage(SessionFinished(sessionId, currentTimeMillis()))
             }
@@ -140,7 +176,7 @@ class Plugin(
                 logger.info { "End of recording for sessions $stopped" }
                 for ((sessionId, data) in stopped) {
                     if (data.any()) {
-                        probeSender(sessionId)(data)
+                        probeCollector(sessionId)(data)
                     }
                 }
                 val ids = stopped.map { it.first }
@@ -162,26 +198,61 @@ class Plugin(
     }
 
     override fun parseAction(
-        rawAction: String
+        rawAction: String,
     ): AgentAction = json.decodeFromString(AgentAction.serializer(), rawAction)
 }
 
-fun Plugin.probeSender(
+fun Plugin.probeCollector(
     sessionId: String,
     sendChanged: Boolean = false
 ): RealtimeHandler = { execData ->
     execData.map(ExecDatum::toExecClassData)
-        .chunked(0xffff)
-        .map { chunk -> CoverDataPart(sessionId, chunk) }
-        .sumBy { message ->
-            sendMessage(message)
-            message.data.count()
-        }.takeIf { sendChanged && it > 0 }?.let {
-            sendMessage(SessionChanged(sessionId, it))
+        .chunked(0xffff) { CoverDataPart(sessionId, it) }
+        .takeIf { it.any() }
+        ?.let { messages ->
+            val encoded = messages.map {
+                val encoded = ProtoBuf.encodeToByteArray(CoverMessage.serializer(), it)
+                val compressed = Zstd.compress(encoded)
+                Base64.getEncoder().encodeToString(compressed)
+            }
+            val count = messages.sumBy { it.data.count() }
+            probesDb.add(encoded.toCoverageInfo(sessionId, sendChanged, count))
         }
 }
 
 fun Plugin.sendMessage(message: CoverMessage) {
     val messageStr = json.encodeToString(CoverMessage.serializer(), message)
     send(messageStr)
+}
+
+private fun Sequence<String>.toCoverageInfo(
+    sessionId: String,
+    sendChanged: Boolean,
+    count: Int
+) = CoverageInfo(sessionId, toList(), sendChanged, count)
+
+data class CoverageInfo(
+    val sessionId: String,
+    val coverMessage: List<String>,
+    val sendChanged: Boolean,
+    val count: Int,
+) : JvmSerializable {
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is CoverageInfo) return false
+        if (sessionId != other.sessionId) return false
+        if (coverMessage != other.coverMessage) return false
+        if (sendChanged != other.sendChanged) return false
+        if (count != other.count) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = sessionId.hashCode()
+        result = 31 * result + coverMessage.hashCode()
+        result = 31 * result + sendChanged.hashCode()
+        result = 31 * result + count
+        return result
+    }
 }

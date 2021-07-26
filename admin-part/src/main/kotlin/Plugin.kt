@@ -28,10 +28,13 @@ import com.epam.drill.plugins.test2code.storage.*
 import com.epam.drill.plugins.test2code.util.*
 import com.epam.kodux.*
 import com.epam.kodux.util.*
+import com.github.luben.zstd.*
 import kotlinx.atomicfu.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
+import kotlinx.serialization.protobuf.*
 import java.io.*
+import java.util.*
 import java.util.concurrent.*
 
 internal object AsyncJobDispatcher : CoroutineScope {
@@ -198,7 +201,13 @@ class Plugin(
         instanceId: String,
         content: String,
     ): Any = run {
-        val message = json.decodeFromString(CoverMessage.serializer(), content)
+        val message = if (content.startsWith("{"))
+            json.decodeFromString(CoverMessage.serializer(), content)
+        else {
+            val decode = Base64.getDecoder().decode(content)
+            val decompress = Zstd.decompress(decode, Zstd.decompressedSize(decode).toInt())
+            ProtoBuf.decodeFromByteArray(CoverMessage.serializer(), decompress)
+        }
         processData(instanceId, message)
             .let { "" } //TODO eliminate magic empty strings from API
     }
@@ -609,7 +618,11 @@ class Plugin(
                             send(buildVersion, Routes.Build.Scopes.Scope.MethodsCoveredByTest.All(test), all)
                             send(buildVersion, Routes.Build.Scopes.Scope.MethodsCoveredByTest.Modified(test), modified)
                             send(buildVersion, Routes.Build.Scopes.Scope.MethodsCoveredByTest.New(test), new)
-                            send(buildVersion, Routes.Build.Scopes.Scope.MethodsCoveredByTest.Unaffected(test), unaffected)
+                            send(
+                                buildVersion,
+                                Routes.Build.Scopes.Scope.MethodsCoveredByTest.Unaffected(test),
+                                unaffected
+                            )
                         }
                     } ?: run {
                         Routes.Build.MethodsCoveredByTest(typedTest.id(), Routes.Build()).let { test ->
