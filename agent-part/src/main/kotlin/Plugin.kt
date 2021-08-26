@@ -175,9 +175,8 @@ class Plugin(
             val sessionId = context()
             val testName = context[DRIlL_TEST_NAME] ?: "unspecified"
             runtimes[sessionId]?.run {
-                val execDatum = getOrPut(testName) {
-                    arrayOfNulls<ExecDatum>(MAX_CLASS_COUNT).apply { fillFromMeta(testName) }
-                }
+                val execDatum = getOrPut(testName) { arrayOfNulls(MAX_CLASS_COUNT) }
+                fillFromMeta(testName)
                 requestThreadLocal.set(execDatum)
             }
         }

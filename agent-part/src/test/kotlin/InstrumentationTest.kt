@@ -15,9 +15,9 @@
  */
 package com.epam.drill.plugins.test2code
 
+import com.epam.drill.instrumentation.data.*
 import com.epam.drill.plugins.test2code.InstrumentationForTest.Companion.sessionId
 import org.junit.jupiter.api.*
-import test.*
 import kotlin.test.*
 import kotlin.test.Test
 
@@ -84,6 +84,31 @@ class InstrumentationTest {
     fun `should create instance and invoke instrumented class`() {
         val instrumentation = InstrumentationForTest(TestTarget::class)
         instrumentation.runClass()
+    }
+
+    @Test
+    fun `big conditions - instrumented class should be larger the the original`() {
+        val instrumentation = InstrumentationForTest(InvokeBigConditions::class)
+        val instrumentedBytes = instrumentation.instrumentClass()
+        assertTrue { instrumentedBytes.count() > instrumentation.originalBytes.count() }
+    }
+
+    @Test
+    fun `big conditions - should instrumented without coverage`() {
+        val counter = InstrumentationForTest(InvokeBigConditions::class).collectCoverage(false)
+        assertEquals(0, counter?.coveredCount)
+    }
+
+    @Test
+    fun `big conditions - should instrumented with coverage`() {
+        val counter = InstrumentationForTest(InvokeBigConditions::class).collectCoverage()
+        assertTrue { counter?.coveredCount!! > 2_000 }
+        assertTrue { counter?.missedCount!! < 500 }
+    }
+
+    @Test
+    fun `cycles - should instrumented with coverage for cycles`() {
+        InstrumentationForTest(InvokeCycles::class).collectCoverage()
     }
 }
 
