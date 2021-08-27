@@ -87,6 +87,7 @@ data class ActiveScopeChangePayload(
     val scopeName: String,
     val savePrevScope: Boolean = false,
     val prevScopeEnabled: Boolean = true,
+    val forceFinish: Boolean = false,
 )
 
 @Serializable
